@@ -161,3 +161,164 @@
     )
 )
 
+
+(define-public (extend-warranty (warranty-id uint) (extension-duration uint))
+    (let
+        (
+            (warranty (unwrap! (map-get? warranties warranty-id) err-warranty-not-found))
+            (new-expiry (+ (get expiry-date warranty) extension-duration))
+        )
+        (asserts! (is-eq tx-sender contract-owner) err-not-authorized)
+        (asserts! (get is-active warranty) err-expired-warranty)
+        (map-set warranties warranty-id
+            (merge warranty {expiry-date: new-expiry})
+        )
+        (ok true)
+    )
+)
+
+
+
+(define-public (resolve-claim (warranty-id uint) (resolution (string-ascii 12)))
+    (let
+        (
+            (claim (unwrap! (map-get? warranty-claims warranty-id) err-warranty-not-found))
+        )
+        (asserts! (is-eq tx-sender contract-owner) err-not-authorized)
+        (map-set warranty-claims warranty-id
+            (merge claim {status: resolution})
+        )
+        (ok true)
+    )
+)
+
+
+(define-constant err-invalid-status (err u105))
+(define-public (update-warranty-status (warranty-id uint) (new-status bool))
+    (let
+        (
+            (warranty (unwrap! (map-get? warranties warranty-id) err-warranty-not-found))
+        )
+        (asserts! (is-eq tx-sender contract-owner) err-not-authorized)
+        (map-set warranties warranty-id
+            (merge warranty {is-active: new-status})
+        )
+        (ok true)
+    )
+)
+
+(define-map warranty-ratings
+    uint 
+    {
+        rating: uint,
+        review: (string-ascii 256),
+        reviewer: principal
+    }
+)
+
+(define-public (rate-warranty (warranty-id uint) (rating uint) (review (string-ascii 256)))
+    (let
+        (
+            (warranty (unwrap! (map-get? warranties warranty-id) err-warranty-not-found))
+        )
+        (asserts! (is-eq (get owner warranty) tx-sender) err-not-authorized)
+        (asserts! (<= rating u5) (err u106))
+        (map-set warranty-ratings warranty-id
+            {
+                rating: rating,
+                review: review,
+                reviewer: tx-sender
+            }
+        )
+        (ok true)
+    )
+)
+
+
+(define-map maintenance-schedule
+    uint
+    {
+        last-maintenance: uint,
+        maintenance-interval: uint,
+        next-due: uint
+    }
+)
+
+(define-public (set-maintenance-schedule (warranty-id uint) (interval uint))
+    (let
+        (
+            (warranty (unwrap! (map-get? warranties warranty-id) err-warranty-not-found))
+            (current-block stacks-block-height)
+        )
+        (asserts! (is-eq tx-sender contract-owner) err-not-authorized)
+        (map-set maintenance-schedule warranty-id
+            {
+                last-maintenance: current-block,
+                maintenance-interval: interval,
+                next-due: (+ current-block interval)
+            }
+        )
+        (ok true)
+    )
+)
+
+(define-map warranty-history
+    {warranty-id: uint, event-id: uint}
+    {
+        event-type: (string-ascii 24),
+        event-date: uint,
+        description: (string-ascii 256)
+    }
+)
+
+(define-data-var next-event-id uint u1)
+
+(define-public (add-warranty-event (warranty-id uint) (event-type (string-ascii 24)) (description (string-ascii 256)))
+    (let
+        (
+            (warranty (unwrap! (map-get? warranties warranty-id) err-warranty-not-found))
+            (event-id (var-get next-event-id))
+        )
+        (asserts! (is-eq tx-sender contract-owner) err-not-authorized)
+        (map-set warranty-history
+            {warranty-id: warranty-id, event-id: event-id}
+            {
+                event-type: event-type,
+                event-date: stacks-block-height,
+                description: description
+            }
+        )
+        (var-set next-event-id (+ event-id u1))
+        (ok event-id)
+    )
+)
+
+(define-map transfer-history
+    {warranty-id: uint, transfer-id: uint}
+    {
+        from: principal,
+        to: principal,
+        transfer-date: uint
+    }
+)
+
+(define-data-var next-transfer-id uint u1)
+
+(define-public (record-transfer (warranty-id uint) (from principal) (to principal))
+    (let
+        (
+            (transfer-id (var-get next-transfer-id))
+        )
+        (asserts! (is-eq tx-sender contract-owner) err-not-authorized)
+        (map-set transfer-history
+            {warranty-id: warranty-id, transfer-id: transfer-id}
+            {
+                from: from,
+                to: to,
+                transfer-date: stacks-block-height
+            }
+        )
+        (var-set next-transfer-id (+ transfer-id u1))
+        (ok transfer-id)
+    )
+)
