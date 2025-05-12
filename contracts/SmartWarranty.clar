@@ -322,3 +322,130 @@
         (ok transfer-id)
     )
 )
+
+
+(define-map warranty-bundles
+    uint
+    {
+        bundle-name: (string-ascii 24),
+        warranties: (list 10 uint),
+        discount-rate: uint,
+        created-at: uint,
+        owner: principal
+    }
+)
+
+(define-data-var next-bundle-id uint u1)
+
+(define-public (create-warranty-bundle 
+    (bundle-name (string-ascii 24))
+    (warranty-ids (list 10 uint))
+    (discount-rate uint))
+    (let
+        ((bundle-id (var-get next-bundle-id)))
+        (asserts! (is-eq tx-sender contract-owner) err-not-authorized)
+        (map-set warranty-bundles bundle-id
+            {
+                bundle-name: bundle-name,
+                warranties: warranty-ids,
+                discount-rate: discount-rate,
+                created-at: stacks-block-height,
+                owner: tx-sender
+            }
+        )
+        (var-set next-bundle-id (+ bundle-id u1))
+        (ok bundle-id)
+    )
+)
+
+(define-read-only (get-warranty-bundle (bundle-id uint))
+    (ok (unwrap! (map-get? warranty-bundles bundle-id) err-warranty-not-found))
+)
+
+
+(define-public (transfer-bundle (bundle-id uint) (new-owner principal))
+    (let
+        (
+            (bundle (unwrap! (map-get? warranty-bundles bundle-id) err-warranty-not-found))
+        )
+        (asserts! (is-eq (get owner bundle) tx-sender) err-not-authorized)
+        (map-set warranty-bundles bundle-id
+            (merge bundle {owner: new-owner})
+        )
+        (ok true)
+    )
+)
+(define-public (get-bundle-warranties (bundle-id uint))
+    (let
+        (
+            (bundle (unwrap! (map-get? warranty-bundles bundle-id) err-warranty-not-found))
+        )
+        (ok (get warranties bundle))
+    )
+)
+(define-public (get-bundle-discount (bundle-id uint))
+    (let
+        (
+            (bundle (unwrap! (map-get? warranty-bundles bundle-id) err-warranty-not-found))
+        )
+        (ok (get discount-rate bundle))
+    )
+)
+(define-public (get-bundle-owner (bundle-id uint))
+    (let
+        (
+            (bundle (unwrap! (map-get? warranty-bundles bundle-id) err-warranty-not-found))
+        )
+        (ok (get owner bundle))
+    )
+)
+(define-public (get-bundle-creation-date (bundle-id uint))
+    (let
+        (
+            (bundle (unwrap! (map-get? warranty-bundles bundle-id) err-warranty-not-found))
+        )
+        (ok (get created-at bundle))
+    )
+)
+(define-public (get-bundle-warranty-count (bundle-id uint))
+    (let
+        (
+            (bundle (unwrap! (map-get? warranty-bundles bundle-id) err-warranty-not-found))
+        )
+        (ok (len (get warranties bundle)))
+    )
+)
+
+
+(define-non-fungible-token warranty-certificate uint)
+
+(define-map certificate-metadata
+    uint
+    {
+        warranty-id: uint,
+        metadata-uri: (string-utf8 256),
+        issued-date: uint
+    }
+)
+
+(define-public (mint-warranty-certificate 
+    (warranty-id uint) 
+    (metadata-uri (string-utf8 256)))
+    (let
+        ((warranty (unwrap! (map-get? warranties warranty-id) err-warranty-not-found)))
+        (asserts! (is-eq tx-sender contract-owner) err-not-authorized)
+        (try! (nft-mint? warranty-certificate warranty-id (get owner warranty)))
+        (map-set certificate-metadata warranty-id
+            {
+                warranty-id: warranty-id,
+                metadata-uri: metadata-uri,
+                issued-date: stacks-block-height
+            }
+        )
+        (ok true)
+    )
+)
+
+(define-read-only (get-certificate-metadata (certificate-id uint))
+    (ok (unwrap! (map-get? certificate-metadata certificate-id) err-warranty-not-found))
+)
