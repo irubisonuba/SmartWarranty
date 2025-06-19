@@ -449,3 +449,193 @@
 (define-read-only (get-certificate-metadata (certificate-id uint))
     (ok (unwrap! (map-get? certificate-metadata certificate-id) err-warranty-not-found))
 )
+
+(define-constant err-insufficient-funds (err u107))
+(define-constant err-insurance-not-found (err u108))
+(define-constant err-insurance-expired (err u109))
+(define-constant err-claim-already-processed (err u110))
+
+(define-data-var next-insurance-id uint u1)
+(define-data-var insurance-pool uint u0)
+
+(define-map insurance-policies
+    uint
+    {
+        warranty-id: uint,
+        policy-holder: principal,
+        premium-paid: uint,
+        coverage-amount: uint,
+        start-date: uint,
+        end-date: uint,
+        is-active: bool
+    }
+)
+
+(define-map insurance-claims
+    uint
+    {
+        insurance-id: uint,
+        claim-amount: uint,
+        claim-date: uint,
+        status: (string-ascii 12),
+        processed-date: (optional uint)
+    }
+)
+
+(define-map warranty-insurance-link
+    uint
+    uint
+)
+
+(define-public (purchase-insurance 
+    (warranty-id uint) 
+    (coverage-amount uint) 
+    (duration uint))
+    (let
+        (
+            (warranty (unwrap! (map-get? warranties warranty-id) err-warranty-not-found))
+            (insurance-id (var-get next-insurance-id))
+            (premium (calculate-premium coverage-amount duration))
+        )
+        (asserts! (is-eq (get owner warranty) tx-sender) err-not-authorized)
+        (asserts! (get is-active warranty) err-expired-warranty)
+        (asserts! (>= (stx-get-balance tx-sender) premium) err-insufficient-funds)
+        
+        (try! (stx-transfer? premium tx-sender (as-contract tx-sender)))
+        (var-set insurance-pool (+ (var-get insurance-pool) premium))
+        
+        (map-set insurance-policies insurance-id
+            {
+                warranty-id: warranty-id,
+                policy-holder: tx-sender,
+                premium-paid: premium,
+                coverage-amount: coverage-amount,
+                start-date: stacks-block-height,
+                end-date: (+ stacks-block-height duration),
+                is-active: true
+            }
+        )
+        
+        (map-set warranty-insurance-link warranty-id insurance-id)
+        (var-set next-insurance-id (+ insurance-id u1))
+        (ok insurance-id)
+    )
+)
+
+(define-public (file-insurance-claim 
+    (insurance-id uint) 
+    (claim-amount uint))
+    (let
+        (
+            (policy (unwrap! (map-get? insurance-policies insurance-id) err-insurance-not-found))
+        )
+        (asserts! (is-eq (get policy-holder policy) tx-sender) err-not-authorized)
+        (asserts! (get is-active policy) err-insurance-expired)
+        (asserts! (<= stacks-block-height (get end-date policy)) err-insurance-expired)
+        (asserts! (<= claim-amount (get coverage-amount policy)) err-invalid-claim)
+        
+        (map-set insurance-claims insurance-id
+            {
+                insurance-id: insurance-id,
+                claim-amount: claim-amount,
+                claim-date: stacks-block-height,
+                status: "PENDING",
+                processed-date: none
+            }
+        )
+        (ok true)
+    )
+)
+
+(define-public (process-insurance-claim 
+    (insurance-id uint) 
+    (approved bool))
+    (let
+        (
+            (claim (unwrap! (map-get? insurance-claims insurance-id) err-insurance-not-found))
+            (policy (unwrap! (map-get? insurance-policies insurance-id) err-insurance-not-found))
+            (claim-amount (get claim-amount claim))
+        )
+        (asserts! (is-eq tx-sender contract-owner) err-not-authorized)
+        (asserts! (is-eq (get status claim) "PENDING") err-claim-already-processed)
+        
+        (if approved
+            (begin
+                (asserts! (>= (var-get insurance-pool) claim-amount) err-insufficient-funds)
+                (try! (as-contract (stx-transfer? claim-amount tx-sender (get policy-holder policy))))
+                (var-set insurance-pool (- (var-get insurance-pool) claim-amount))
+                (map-set insurance-claims insurance-id
+                    (merge claim {
+                        status: "APPROVED",
+                        processed-date: (some stacks-block-height)
+                    })
+                )
+            )
+            (map-set insurance-claims insurance-id
+                (merge claim {
+                    status: "REJECTED",
+                    processed-date: (some stacks-block-height)
+                })
+            )
+        )
+        (ok true)
+    )
+)
+
+(define-public (cancel-insurance-policy (insurance-id uint))
+    (let
+        (
+            (policy (unwrap! (map-get? insurance-policies insurance-id) err-insurance-not-found))
+            (refund-amount (/ (get premium-paid policy) u2))
+        )
+        (asserts! (is-eq (get policy-holder policy) tx-sender) err-not-authorized)
+        (asserts! (get is-active policy) err-insurance-expired)
+        
+        (try! (as-contract (stx-transfer? refund-amount tx-sender (get policy-holder policy))))
+        (var-set insurance-pool (- (var-get insurance-pool) refund-amount))
+        
+        (map-set insurance-policies insurance-id
+            (merge policy {is-active: false})
+        )
+        (ok refund-amount)
+    )
+)
+
+(define-read-only (calculate-premium (coverage-amount uint) (duration uint))
+    (let
+        (
+            (base-rate u10)
+            (duration-factor (/ duration u1000))
+            (coverage-factor (/ coverage-amount u100))
+        )
+        (+ base-rate (* duration-factor coverage-factor))
+    )
+)
+
+(define-read-only (get-insurance-policy (insurance-id uint))
+    (ok (unwrap! (map-get? insurance-policies insurance-id) err-insurance-not-found))
+)
+
+(define-read-only (get-insurance-claim (insurance-id uint))
+    (ok (unwrap! (map-get? insurance-claims insurance-id) err-insurance-not-found))
+)
+
+(define-read-only (get-warranty-insurance (warranty-id uint))
+    (ok (map-get? warranty-insurance-link warranty-id))
+)
+
+(define-read-only (get-insurance-pool-balance)
+    (ok (var-get insurance-pool))
+)
+
+(define-read-only (is-insurance-active (insurance-id uint))
+    (let
+        (
+            (policy (unwrap! (map-get? insurance-policies insurance-id) err-insurance-not-found))
+        )
+        (ok (and 
+            (get is-active policy)
+            (<= stacks-block-height (get end-date policy))
+        ))
+    )
+)
