@@ -9,6 +9,83 @@
 (define-constant err-invalid-claim (err u103))
 (define-constant err-maintenance-required (err u104))
 
+(define-constant err-insufficient-signers (err u111))
+(define-constant err-already-signed (err u112))
+(define-constant err-not-authorized-signer (err u113))
+(define-constant err-approval-not-found (err u114))
+
+(define-data-var next-approval-id uint u1)
+
+(define-map authorized-signers
+    principal
+    {
+        name: (string-ascii 32),
+        is-active: bool,
+        signer-type: (string-ascii 16)
+    }
+)
+
+
+(define-constant err-insufficient-funds (err u107))
+(define-constant err-insurance-not-found (err u108))
+(define-constant err-insurance-expired (err u109))
+(define-constant err-claim-already-processed (err u110))
+
+(define-data-var next-insurance-id uint u1)
+(define-data-var insurance-pool uint u0)
+
+(define-map insurance-policies
+    uint
+    {
+        warranty-id: uint,
+        policy-holder: principal,
+        premium-paid: uint,
+        coverage-amount: uint,
+        start-date: uint,
+        end-date: uint,
+        is-active: bool
+    }
+)
+
+(define-map insurance-claims
+    uint
+    {
+        insurance-id: uint,
+        claim-amount: uint,
+        claim-date: uint,
+        status: (string-ascii 12),
+        processed-date: (optional uint)
+    }
+)
+
+(define-map warranty-insurance-link
+    uint
+    uint
+)
+
+
+(define-map multi-sig-approvals
+    uint
+    {
+        warranty-id: uint,
+        approval-type: (string-ascii 24),
+        description: (string-ascii 256),
+        required-signatures: uint,
+        current-signatures: uint,
+        created-at: uint,
+        is-executed: bool,
+        creator: principal
+    }
+)
+
+(define-map approval-signatures
+    {approval-id: uint, signer: principal}
+    {
+        signed-at: uint,
+        signature-data: (string-ascii 128)
+    }
+)
+
 ;; Data variables
 (define-data-var next-warranty-id uint u1)
 
@@ -450,43 +527,6 @@
     (ok (unwrap! (map-get? certificate-metadata certificate-id) err-warranty-not-found))
 )
 
-(define-constant err-insufficient-funds (err u107))
-(define-constant err-insurance-not-found (err u108))
-(define-constant err-insurance-expired (err u109))
-(define-constant err-claim-already-processed (err u110))
-
-(define-data-var next-insurance-id uint u1)
-(define-data-var insurance-pool uint u0)
-
-(define-map insurance-policies
-    uint
-    {
-        warranty-id: uint,
-        policy-holder: principal,
-        premium-paid: uint,
-        coverage-amount: uint,
-        start-date: uint,
-        end-date: uint,
-        is-active: bool
-    }
-)
-
-(define-map insurance-claims
-    uint
-    {
-        insurance-id: uint,
-        claim-amount: uint,
-        claim-date: uint,
-        status: (string-ascii 12),
-        processed-date: (optional uint)
-    }
-)
-
-(define-map warranty-insurance-link
-    uint
-    uint
-)
-
 (define-public (purchase-insurance 
     (warranty-id uint) 
     (coverage-amount uint) 
@@ -638,4 +678,141 @@
             (<= stacks-block-height (get end-date policy))
         ))
     )
+)
+
+(define-public (add-authorized-signer 
+    (signer principal) 
+    (name (string-ascii 32)) 
+    (signer-type (string-ascii 16)))
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-not-authorized)
+        (map-set authorized-signers signer
+            {
+                name: name,
+                is-active: true,
+                signer-type: signer-type
+            }
+        )
+        (ok true)
+    )
+)
+
+(define-public (remove-authorized-signer (signer principal))
+    (let
+        (
+            (signer-info (unwrap! (map-get? authorized-signers signer) err-not-authorized))
+        )
+        (asserts! (is-eq tx-sender contract-owner) err-not-authorized)
+        (map-set authorized-signers signer
+            (merge signer-info {is-active: false})
+        )
+        (ok true)
+    )
+)
+
+(define-public (create-multi-sig-approval 
+    (warranty-id uint) 
+    (approval-type (string-ascii 24)) 
+    (description (string-ascii 256)) 
+    (required-signatures uint))
+    (let
+        (
+            (approval-id (var-get next-approval-id))
+            (warranty (unwrap! (map-get? warranties warranty-id) err-warranty-not-found))
+            (signer-info (unwrap! (map-get? authorized-signers tx-sender) err-not-authorized-signer))
+        )
+        (asserts! (get is-active signer-info) err-not-authorized)
+        (asserts! (> required-signatures u0) err-insufficient-signers)
+        (asserts! (<= required-signatures u10) err-insufficient-signers)
+        
+        (map-set multi-sig-approvals approval-id
+            {
+                warranty-id: warranty-id,
+                approval-type: approval-type,
+                description: description,
+                required-signatures: required-signatures,
+                current-signatures: u0,
+                created-at: stacks-block-height,
+                is-executed: false,
+                creator: tx-sender
+            }
+        )
+        (var-set next-approval-id (+ approval-id u1))
+        (ok approval-id)
+    )
+)
+
+(define-public (sign-approval 
+    (approval-id uint) 
+    (signature-data (string-ascii 128)))
+    (let
+        (
+            (approval (unwrap! (map-get? multi-sig-approvals approval-id) err-approval-not-found))
+            (signer-info (unwrap! (map-get? authorized-signers tx-sender) err-not-authorized-signer))
+            (signature-key {approval-id: approval-id, signer: tx-sender})
+        )
+        (asserts! (get is-active signer-info) err-not-authorized)
+        (asserts! (not (get is-executed approval)) err-claim-already-processed)
+        (asserts! (is-none (map-get? approval-signatures signature-key)) err-already-signed)
+        
+        (map-set approval-signatures signature-key
+            {
+                signed-at: stacks-block-height,
+                signature-data: signature-data
+            }
+        )
+        
+        (let
+            (
+                (new-signature-count (+ (get current-signatures approval) u1))
+            )
+            (map-set multi-sig-approvals approval-id
+                (merge approval {current-signatures: new-signature-count})
+            )
+            (ok new-signature-count)
+        )
+    )
+)
+
+(define-public (execute-approval (approval-id uint))
+    (let
+        (
+            (approval (unwrap! (map-get? multi-sig-approvals approval-id) err-approval-not-found))
+        )
+        (asserts! (>= (get current-signatures approval) (get required-signatures approval)) err-insufficient-signers)
+        (asserts! (not (get is-executed approval)) err-claim-already-processed)
+        
+        (map-set multi-sig-approvals approval-id
+            (merge approval {is-executed: true})
+        )
+        (ok true)
+    )
+)
+
+(define-read-only (get-multi-sig-approval (approval-id uint))
+    (ok (unwrap! (map-get? multi-sig-approvals approval-id) err-approval-not-found))
+)
+
+(define-read-only (get-approval-signature (approval-id uint) (signer principal))
+    (ok (map-get? approval-signatures {approval-id: approval-id, signer: signer}))
+)
+
+(define-read-only (get-authorized-signer (signer principal))
+    (ok (map-get? authorized-signers signer))
+)
+
+(define-read-only (is-approval-ready (approval-id uint))
+    (let
+        (
+            (approval (unwrap! (map-get? multi-sig-approvals approval-id) err-approval-not-found))
+        )
+        (ok (and 
+            (>= (get current-signatures approval) (get required-signatures approval))
+            (not (get is-executed approval))
+        ))
+    )
+)
+
+(define-read-only (has-signer-signed (approval-id uint) (signer principal))
+    (ok (is-some (map-get? approval-signatures {approval-id: approval-id, signer: signer})))
 )
